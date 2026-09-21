@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Ring buffer / test data artifacts (generated locally, not source)
+*.buf
+
+# Editor / OS
+.vscode/
+.DS_Store
+
+# Cython build artifacts (for Week 2 onward)
+*.c
+*.pyd
+build/
