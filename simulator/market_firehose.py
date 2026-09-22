@@ -11,7 +11,7 @@ from ipc.ring_buffer import RingBuffer
 # ---- Simulation config -----------------------------------------------------
 BUFFER_PATH = "market_orders.buf"
 BUFFER_CAPACITY = 100_000        # number of order slots in the ring
-TARGET_ORDERS_PER_SECOND = 10_000  # start conservative; tune upward later
+TARGET_ORDERS_PER_SECOND = 20_000  # start conservative; tune upward later
 BATCH_SIZE = 500                 # orders written per asyncio tick
 RUN_DURATION_SECONDS = 5         # how long the firehose runs for this demo
 
