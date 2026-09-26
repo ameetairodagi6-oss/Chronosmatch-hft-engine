@@ -54,6 +54,28 @@ python simulator/market_firehose.py
 Expected output: total orders written, achieved orders/sec, and a sample 
 of the last 5 orders read back from the buffer.
 
+### 4. Cython Order Book Engine
+Compile it first:
+```bash
+cd engine
+python setup.py build_ext --inplace
+cd ..
+```
+Then run the tests:
+```bash
+python tests/test_order_book.py
+```
+Expected: 10 tests passing, covering matching, partial fills, and price-time priority.
+
+### 5. Live Dashboard
+```bash
+python dashboard/dashboard.py
+```
+Displays live Best Bid, Best Ask, Spread, and per-order latency. Press 'q' to quit.
+
+## Week 2 Status
+✅ Cython Limit Order Book (Price-Time Priority) — compiled, 10 tests passing
+✅ Curses live dashboard — Bid/Ask spread + latency, working
 ## Development Plan (4 Weeks)
 - **Week 1:** Build the mmap ring buffer (IPC) + asyncio market order firehose
 - **Week 2:** Write the Cython Limit Order Book engine + curses latency dashboard

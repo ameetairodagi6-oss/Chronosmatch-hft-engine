@@ -83,7 +83,9 @@ def run_dashboard(stdscr):
 
         stdscr.addstr(3, 0, f"Best Bid:  {best_bid if best_bid is not None else '--':>10}")
         stdscr.addstr(4, 0, f"Best Ask:  {best_ask if best_ask is not None else '--':>10}")
-        stdscr.addstr(5, 0, f"Spread:    {spread if spread is not None else '--':>10}")
+        spread_display = f"{spread:.4f}" if spread is not None else "--" 
+        stdscr.addstr(5, 0, f"Spread: {spread_display:>10}")
+        stdscr.addstr(5, 0, f"Spread:    {spread_display:>10}")
 
         stdscr.addstr(7, 0, f"Orders submitted:  {order_id}")
         stdscr.addstr(8, 0, f"Trades matched:    {total_trades}")
