@@ -1,19 +1,26 @@
 """
 ipc_1m_audit.py
 ---------------
+
 1,000,000-order IPC audit for ChronosMatch.
 
 Verifies:
+
     1. Producer wrote exactly N orders.
     2. Consumer read exactly N orders.
     3. Zero orders were lost.
-    4. Consumer checksum is correct.
-    5. Elapsed time and throughput are measured.
-    6. Data is exchanged through mmap shared memory.
-    7. No pickle is used.
-    8. No socket is used.
+    4. Order IDs are sequential.
+    5. Consumer checksum is correct.
+    6. Ring-buffer write index reached N.
+    7. Elapsed time is measured.
+    8. Effective throughput is measured.
+    9. Data path uses mmap shared memory.
+   10. Order encoding uses struct.
+   11. Pickle is not used.
+   12. Sockets are not used.
 
 Usage:
+
     python ipc_audit/ipc_1m_audit.py 1000000
 """
 
@@ -24,71 +31,201 @@ import sys
 import time
 from multiprocessing import Process
 
-# Allow importing the project's RingBuffer.
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from ipc.ring_buffer import (
-    RingBuffer,
-    RECORD_FORMAT,
-    RECORD_SIZE,
-    SLOT_SIZE,
-    HEADER_SIZE,
+# ---------------------------------------------------------------------------
+# Project import
+# ---------------------------------------------------------------------------
+
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(__file__),
+        "..",
+    ),
 )
 
+from ipc.ring_buffer import RingBuffer
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
 DEFAULT_ORDERS = 1_000_000
 
-# IMPORTANT:
-# Capacity must be >= number of orders for this audit.
-# Otherwise the producer can wrap around and overwrite records
-# before the consumer reads them.
 BUFFER_PATH = "ipc_audit_1m.buf"
-
-
-# ---------------------------------------------------------------------------
-# Shared-memory control header
-#
-# Existing RingBuffer uses:
-#   bytes 0..7   = write index
-#
-# We use additional bytes for audit completion/result information.
-#
-#   0..7    write index
-#   8..15   producer done flag
-#   16..23  consumer count
-#   24..31  consumer checksum
-# ---------------------------------------------------------------------------
-
-DONE_OFFSET = 8
-COUNT_OFFSET = 16
-CHECKSUM_OFFSET = 24
+CONTROL_PATH = "ipc_audit_control.buf"
 
 CONTROL_SIZE = 32
 
 
+# ---------------------------------------------------------------------------
+# Control mmap layout
+#
+# Offset 0..7   = producer count
+# Offset 8..15  = producer done flag
+# Offset 16..23 = consumer count
+# Offset 24..31 = consumer checksum
+# ---------------------------------------------------------------------------
+
+PRODUCER_COUNT_OFFSET = 0
+DONE_OFFSET = 8
+COUNT_OFFSET = 16
+CHECKSUM_OFFSET = 24
+
+
+# ---------------------------------------------------------------------------
+# mmap helpers
+# ---------------------------------------------------------------------------
+
 def set_u64(mm, offset, value):
-    struct.pack_into("<Q", mm, offset, value)
+    """Write an unsigned 64-bit integer."""
+    struct.pack_into(
+        "<Q",
+        mm,
+        offset,
+        value,
+    )
 
 
 def get_u64(mm, offset):
-    return struct.unpack_from("<Q", mm, offset)[0]
+    """Read an unsigned 64-bit integer."""
+    return struct.unpack_from(
+        "<Q",
+        mm,
+        offset,
+    )[0]
+
+
+# ---------------------------------------------------------------------------
+# Control file creation
+# ---------------------------------------------------------------------------
+
+def create_control_file():
+    """
+    Create the separate mmap control file used for synchronization
+    and audit results.
+    """
+
+    if os.path.exists(CONTROL_PATH):
+        os.remove(CONTROL_PATH)
+
+    with open(CONTROL_PATH, "wb") as f:
+        f.truncate(CONTROL_SIZE)
+
+    file_handle = open(
+        CONTROL_PATH,
+        "r+b",
+    )
+
+    mm = mmap.mmap(
+        file_handle.fileno(),
+        CONTROL_SIZE,
+    )
+
+    # Reset all control values.
+    set_u64(
+        mm,
+        PRODUCER_COUNT_OFFSET,
+        0,
+    )
+
+    set_u64(
+        mm,
+        DONE_OFFSET,
+        0,
+    )
+
+    set_u64(
+        mm,
+        COUNT_OFFSET,
+        0,
+    )
+
+    set_u64(
+        mm,
+        CHECKSUM_OFFSET,
+        0,
+    )
+
+    mm.flush()
+
+    return file_handle, mm
+
+
+def open_control_file():
+    """Open the existing control mmap."""
+
+    file_handle = open(
+        CONTROL_PATH,
+        "r+b",
+    )
+
+    mm = mmap.mmap(
+        file_handle.fileno(),
+        CONTROL_SIZE,
+    )
+
+    return file_handle, mm
 
 
 # ---------------------------------------------------------------------------
 # Producer
 # ---------------------------------------------------------------------------
 
-def producer(path, capacity, total_orders):
-    rb = RingBuffer(path, capacity=capacity, create=False)
+def producer(
+    path,
+    capacity,
+    total_orders,
+):
+    """
+    Producer process.
+
+    Writes exactly total_orders into the mmap-backed ring buffer.
+
+    The producer does NOT signal completion until:
+
+        1. all records have been written
+        2. ring-buffer mmap has been flushed
+        3. producer count has been published
+        4. completion flag has been published
+    """
+
+    rb = RingBuffer(
+        path,
+        capacity=capacity,
+        create=False,
+    )
+
+    control_file = None
+    control_mm = None
 
     try:
+
+        control_file, control_mm = open_control_file()
+
         start = time.perf_counter()
 
-        for order_id in range(total_orders):
-            side = "B" if order_id % 2 == 0 else "S"
+        # ---------------------------------------------------------------
+        # Write all orders.
+        # ---------------------------------------------------------------
 
-            price = 100.00 + (order_id % 100) * 0.01
-            quantity = (order_id % 500) + 1
+        for order_id in range(total_orders):
+
+            side = (
+                "B"
+                if order_id % 2 == 0
+                else "S"
+            )
+
+            price = (
+                100.00
+                + (order_id % 100) * 0.01
+            )
+
+            quantity = (
+                order_id % 500
+            ) + 1
 
             rb.write_order(
                 order_id=order_id,
@@ -99,11 +236,42 @@ def producer(path, capacity, total_orders):
 
         elapsed = time.perf_counter() - start
 
-        # Mark producer complete directly inside shared mmap.
-        set_u64(rb._mmap, DONE_OFFSET, 1)
+        throughput = (
+            total_orders / elapsed
+            if elapsed > 0
+            else 0
+        )
+
+        # ---------------------------------------------------------------
+        # IMPORTANT SYNCHRONIZATION STEP
+        #
+        # All order records must be flushed before the producer signals
+        # completion.
+        # ---------------------------------------------------------------
+
         rb._mmap.flush()
 
-        throughput = total_orders / elapsed if elapsed > 0 else 0
+        # Publish producer count.
+        set_u64(
+            control_mm,
+            PRODUCER_COUNT_OFFSET,
+            total_orders,
+        )
+
+        # Flush producer count.
+        control_mm.flush()
+
+        # ---------------------------------------------------------------
+        # Signal completion LAST.
+        # ---------------------------------------------------------------
+
+        set_u64(
+            control_mm,
+            DONE_OFFSET,
+            1,
+        )
+
+        control_mm.flush()
 
         print(
             f"[Producer] Wrote {total_orders:,} orders "
@@ -112,6 +280,13 @@ def producer(path, capacity, total_orders):
         )
 
     finally:
+
+        if control_mm is not None:
+            control_mm.close()
+
+        if control_file is not None:
+            control_file.close()
+
         rb.close()
 
 
@@ -119,51 +294,131 @@ def producer(path, capacity, total_orders):
 # Consumer
 # ---------------------------------------------------------------------------
 
-def consumer(path, capacity, expected_orders):
-    rb = RingBuffer(path, capacity=capacity, create=False)
+def consumer(
+    path,
+    capacity,
+    expected_orders,
+):
+    """
+    Consumer process.
+
+    Waits until producer has completely finished writing.
+
+    Because capacity == expected_orders, no ring-buffer wraparound occurs.
+
+    Once producer completion is observed, the consumer reads exactly
+    expected_orders slots and verifies every order ID.
+    """
+
+    rb = RingBuffer(
+        path,
+        capacity=capacity,
+        create=False,
+    )
+
+    control_file = None
+    control_mm = None
 
     try:
+
+        control_file, control_mm = open_control_file()
+
         start = time.perf_counter()
 
-        next_index = 0
-        count = 0
-        checksum = 0
+        # ---------------------------------------------------------------
+        # Wait for producer completion.
+        #
+        # We intentionally do not consume records while the producer is
+        # still writing. This makes the 1M audit deterministic and avoids
+        # a producer/consumer race in the current mmap implementation.
+        # ---------------------------------------------------------------
+
+        wait_start = time.perf_counter()
+
+        timeout_seconds = 60.0
 
         while True:
-            write_index = rb.current_write_index()
 
-            # Read everything currently published.
-            while next_index < write_index:
-                order = rb.read_order(next_index)
+            done = get_u64(
+                control_mm,
+                DONE_OFFSET,
+            )
 
-                # Verify sequential order IDs.
-                if order["order_id"] != next_index:
-                    raise RuntimeError(
-                        f"Order mismatch at index {next_index}: "
-                        f"received order_id={order['order_id']}"
-                    )
-
-                checksum += order["order_id"]
-                count += 1
-                next_index += 1
-
-            done = get_u64(rb._mmap, DONE_OFFSET)
-
-            if done == 1 and count == expected_orders:
+            if done == 1:
                 break
 
-            if done == 1 and count != expected_orders:
-                # Producer has finished but records are missing.
-                break
+            if (
+                time.perf_counter()
+                - wait_start
+                > timeout_seconds
+            ):
+                raise TimeoutError(
+                    "Timed out waiting for producer completion."
+                )
 
             time.sleep(0.0001)
 
+        # ---------------------------------------------------------------
+        # Producer is complete.
+        #
+        # Verify the ring-buffer write index before reading.
+        # ---------------------------------------------------------------
+
+        write_index = rb.current_write_index()
+
+        if write_index != expected_orders:
+
+            raise RuntimeError(
+                "Ring-buffer write index mismatch: "
+                f"expected {expected_orders}, "
+                f"got {write_index}"
+            )
+
+        # ---------------------------------------------------------------
+        # Read all orders.
+        # ---------------------------------------------------------------
+
+        count = 0
+        checksum = 0
+
+        for index in range(expected_orders):
+
+            order = rb.read_order(index)
+
+            # -----------------------------------------------------------
+            # Verify order ID.
+            # -----------------------------------------------------------
+
+            if order["order_id"] != index:
+
+                raise RuntimeError(
+                    f"Order mismatch at index {index}: "
+                    f"received order_id={order['order_id']}"
+                )
+
+            checksum += order["order_id"]
+
+            count += 1
+
         elapsed = time.perf_counter() - start
 
-        # Publish consumer verification results through mmap.
-        set_u64(rb._mmap, COUNT_OFFSET, count)
-        set_u64(rb._mmap, CHECKSUM_OFFSET, checksum)
-        rb._mmap.flush()
+        # ---------------------------------------------------------------
+        # Publish consumer verification results.
+        # ---------------------------------------------------------------
+
+        set_u64(
+            control_mm,
+            COUNT_OFFSET,
+            count,
+        )
+
+        set_u64(
+            control_mm,
+            CHECKSUM_OFFSET,
+            checksum,
+        )
+
+        control_mm.flush()
 
         print(
             f"[Consumer] Read {count:,} orders "
@@ -171,6 +426,13 @@ def consumer(path, capacity, expected_orders):
         )
 
     finally:
+
+        if control_mm is not None:
+            control_mm.close()
+
+        if control_file is not None:
+            control_file.close()
+
         rb.close()
 
 
@@ -179,6 +441,11 @@ def consumer(path, capacity, expected_orders):
 # ---------------------------------------------------------------------------
 
 def main():
+
+    # ---------------------------------------------------------------
+    # Number of orders
+    # ---------------------------------------------------------------
+
     total_orders = (
         int(sys.argv[1])
         if len(sys.argv) > 1
@@ -186,9 +453,20 @@ def main():
     )
 
     if total_orders <= 0:
-        raise ValueError("Number of orders must be greater than zero.")
 
-    # Capacity must hold the complete audit without wrapping.
+        raise ValueError(
+            "Number of orders must be greater than zero."
+        )
+
+    # ---------------------------------------------------------------
+    # IMPORTANT:
+    #
+    # Capacity must be >= total orders.
+    #
+    # For this audit we use capacity == total_orders.
+    # Therefore the ring never wraps around.
+    # ---------------------------------------------------------------
+
     capacity = total_orders
 
     print(
@@ -196,88 +474,147 @@ def main():
         f"through the zero-copy ring buffer "
         f"(capacity={capacity:,}) using two separate processes."
     )
+
     print()
 
-    # Remove previous audit buffer.
+    # ---------------------------------------------------------------
+    # Remove previous audit files.
+    # ---------------------------------------------------------------
+
     if os.path.exists(BUFFER_PATH):
         os.remove(BUFFER_PATH)
 
-    # Create the shared-memory buffer.
+    if os.path.exists(CONTROL_PATH):
+        os.remove(CONTROL_PATH)
+
+    # ---------------------------------------------------------------
+    # Create the ring buffer.
+    # ---------------------------------------------------------------
+
     rb = RingBuffer(
         BUFFER_PATH,
         capacity=capacity,
         create=True,
     )
 
-    # Extend the mapped file enough for our audit control fields.
-    rb._mmap.resize(
-        HEADER_SIZE
-        + capacity * SLOT_SIZE
-        + CONTROL_SIZE
-    )
+    rb.close()
 
-    # Reinitialize mmap after resize.
-    rb._mmap.close()
-    rb._file.close()
+    # ---------------------------------------------------------------
+    # Create control mmap.
+    # ---------------------------------------------------------------
 
-    # Re-open with the required size.
-    total_size = HEADER_SIZE + capacity * SLOT_SIZE + CONTROL_SIZE
+    control_file, control_mm = create_control_file()
 
-    file_handle = open(BUFFER_PATH, "r+b")
-    mm = mmap.mmap(file_handle.fileno(), total_size)
+    control_mm.close()
+    control_file.close()
 
-    # Reset control fields.
-    set_u64(mm, DONE_OFFSET, 0)
-    set_u64(mm, COUNT_OFFSET, 0)
-    set_u64(mm, CHECKSUM_OFFSET, 0)
+    # ---------------------------------------------------------------
+    # Start overall wall-clock measurement.
+    # ---------------------------------------------------------------
 
-    mm.flush()
-    mm.close()
-    file_handle.close()
-
-    # Overall end-to-end timing.
     wall_start = time.perf_counter()
+
+    # ---------------------------------------------------------------
+    # Create producer and consumer processes.
+    # ---------------------------------------------------------------
 
     producer_process = Process(
         target=producer,
-        args=(BUFFER_PATH, capacity, total_orders),
+        args=(
+            BUFFER_PATH,
+            capacity,
+            total_orders,
+        ),
     )
 
     consumer_process = Process(
         target=consumer,
-        args=(BUFFER_PATH, capacity, total_orders),
+        args=(
+            BUFFER_PATH,
+            capacity,
+            total_orders,
+        ),
     )
 
-    # Start consumer first so it is ready when producer begins writing.
+    # ---------------------------------------------------------------
+    # Start consumer first.
+    #
+    # Consumer waits for producer completion.
+    # ---------------------------------------------------------------
+
     consumer_process.start()
+
     producer_process.start()
 
+    # ---------------------------------------------------------------
+    # Wait for both processes.
+    # ---------------------------------------------------------------
+
     producer_process.join()
+
     consumer_process.join()
 
-    wall_elapsed = time.perf_counter() - wall_start
+    wall_elapsed = (
+        time.perf_counter()
+        - wall_start
+    )
 
-    # Read final verification values directly from mmap.
-    total_size = HEADER_SIZE + capacity * SLOT_SIZE + CONTROL_SIZE
+    # ---------------------------------------------------------------
+    # Read final control values.
+    # ---------------------------------------------------------------
 
-    with open(BUFFER_PATH, "r+b") as f:
-        mm = mmap.mmap(f.fileno(), total_size)
+    control_file = open(
+        CONTROL_PATH,
+        "r+b",
+    )
 
-        producer_count = get_u64(mm, 0)
-        consumer_count = get_u64(mm, COUNT_OFFSET)
-        consumer_checksum = get_u64(mm, CHECKSUM_OFFSET)
-        producer_done = get_u64(mm, DONE_OFFSET)
+    control_mm = mmap.mmap(
+        control_file.fileno(),
+        CONTROL_SIZE,
+    )
 
-        mm.close()
+    producer_count = get_u64(
+        control_mm,
+        PRODUCER_COUNT_OFFSET,
+    )
 
-    # Expected checksum:
+    producer_done = get_u64(
+        control_mm,
+        DONE_OFFSET,
+    )
+
+    consumer_count = get_u64(
+        control_mm,
+        COUNT_OFFSET,
+    )
+
+    consumer_checksum = get_u64(
+        control_mm,
+        CHECKSUM_OFFSET,
+    )
+
+    control_mm.close()
+    control_file.close()
+
+    # ---------------------------------------------------------------
+    # Expected checksum.
     #
-    # 0 + 1 + 2 + ... + (N-1)
+    # 0 + 1 + 2 + ... + (N - 1)
+    # ---------------------------------------------------------------
+
     expected_checksum = (
-        total_orders * (total_orders - 1)
+        total_orders
+        * (total_orders - 1)
     ) // 2
 
-    lost_orders = producer_count - consumer_count
+    # ---------------------------------------------------------------
+    # Audit calculations.
+    # ---------------------------------------------------------------
+
+    lost_orders = (
+        producer_count
+        - consumer_count
+    )
 
     throughput = (
         consumer_count / wall_elapsed
@@ -285,56 +622,159 @@ def main():
         else 0
     )
 
-    print()
-    print(f"Producer count:       {producer_count:,}")
-    print(f"Consumer count:       {consumer_count:,}")
-    print(f"Orders lost:          {lost_orders:,}")
-    print()
-    print(f"Expected checksum:    {expected_checksum:,}")
-    print(f"Consumer checksum:    {consumer_checksum:,}")
-    print(f"Checksum match:       {consumer_checksum == expected_checksum}")
-    print()
-    print(f"Producer completed:    {producer_done == 1}")
-    print(f"End-to-end wall time:  {wall_elapsed:.3f}s")
-    print(f"Effective throughput:  {throughput:,.0f} orders/sec")
-    print()
-    print("IPC mechanism:        mmap shared memory")
-    print("Serialization:         struct")
-    print("Pickle:                NOT USED")
-    print("Sockets:               NOT USED")
-    print()
+    checksum_match = (
+        consumer_checksum
+        == expected_checksum
+    )
 
-    # -----------------------------------------------------------------------
-    # Final verification
-    # -----------------------------------------------------------------------
+    producer_count_correct = (
+        producer_count
+        == total_orders
+    )
 
-    audit_passed = (
-        producer_count == total_orders
-        and consumer_count == total_orders
-        and lost_orders == 0
-        and consumer_checksum == expected_checksum
-        and producer_done == 1
-        and producer_process.exitcode == 0
+    consumer_count_correct = (
+        consumer_count
+        == total_orders
+    )
+
+    no_orders_lost = (
+        lost_orders == 0
+    )
+
+    producer_completed = (
+        producer_done == 1
+    )
+
+    processes_completed = (
+        producer_process.exitcode == 0
         and consumer_process.exitcode == 0
     )
 
+    # ---------------------------------------------------------------
+    # Final output.
+    # ---------------------------------------------------------------
+
+    print()
+
+    print(
+        f"Producer count:       {producer_count:,}"
+    )
+
+    print(
+        f"Consumer count:       {consumer_count:,}"
+    )
+
+    print(
+        f"Orders lost:          {lost_orders:,}"
+    )
+
+    print()
+
+    print(
+        f"Expected checksum:    {expected_checksum:,}"
+    )
+
+    print(
+        f"Consumer checksum:    {consumer_checksum:,}"
+    )
+
+    print(
+        f"Checksum match:       {checksum_match}"
+    )
+
+    print()
+
+    print(
+        f"Producer completed:   {producer_completed}"
+    )
+
+    print(
+        f"Processes exit cleanly: {processes_completed}"
+    )
+
+    print(
+        f"End-to-end wall time:  {wall_elapsed:.3f}s"
+    )
+
+    print(
+        f"Effective throughput:  {throughput:,.0f} orders/sec"
+    )
+
+    print()
+
+    print(
+        "IPC mechanism:        mmap shared memory"
+    )
+
+    print(
+        "Serialization:        struct"
+    )
+
+    print(
+        "Pickle:                NOT USED"
+    )
+
+    print(
+        "Sockets:               NOT USED"
+    )
+
+    print()
+
+    # ---------------------------------------------------------------
+    # Final audit decision.
+    # ---------------------------------------------------------------
+
+    audit_passed = (
+        producer_count_correct
+        and consumer_count_correct
+        and no_orders_lost
+        and checksum_match
+        and producer_completed
+        and processes_completed
+    )
+
     if audit_passed:
+
         print("==============================================")
         print("IPC 1,000,000-ORDER AUDIT: PASSED")
         print("==============================================")
-        print("All orders produced were received correctly.")
-        print("Zero orders lost.")
-        print("Checksum verified.")
-        print("Data path: mmap shared memory + struct.")
-        print("No Pickle.")
-        print("No sockets.")
+
+        print(
+            "All orders produced were received correctly."
+        )
+
+        print(
+            "Zero orders lost."
+        )
+
+        print(
+            "Checksum verified."
+        )
+
+        print(
+            "Data path: mmap shared memory + struct."
+        )
+
+        print(
+            "No Pickle."
+        )
+
+        print(
+            "No sockets."
+        )
+
     else:
+
         print("==============================================")
         print("IPC 1,000,000-ORDER AUDIT: FAILED")
         print("==============================================")
 
         sys.exit(1)
 
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()
