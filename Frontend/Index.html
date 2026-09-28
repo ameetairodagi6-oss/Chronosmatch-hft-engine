@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>ChronosMatch HFT Engine</title>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <header>
+        <div>
+            <h1>CHRONOSMATCH</h1>
+            <p>High-Frequency Trading Matching Engine</p>
+        </div>
+
+        <div id="engine-status" class="status">
+            ● CONNECTING
+        </div>
+    </header>
+
+
+    <!-- MAIN STATISTICS -->
+
+    <section class="stats">
+
+        <div class="card">
+            <span>ORDERS</span>
+            <strong id="orders">0</strong>
+        </div>
+
+        <div class="card">
+            <span>TRADES</span>
+            <strong id="trades">0</strong>
+        </div>
+
+        <div class="card">
+            <span>THROUGHPUT</span>
+            <strong id="throughput">0</strong>
+            <small>orders/sec</small>
+        </div>
+
+        <div class="card">
+            <span>IPC</span>
+            <strong id="ipc">mmap</strong>
+        </div>
+
+    </section>
+
+
+    <!-- ORDER BOOK + MARKET SUMMARY -->
+
+    <section class="main-grid">
+
+        <div class="panel">
+
+            <h2>LIVE ORDER BOOK</h2>
+
+            <div class="orderbook">
+
+                <div class="book-column">
+                    <h3>BID</h3>
+
+                    <div class="book-header">
+                        <span>PRICE</span>
+                        <span>QTY</span>
+                    </div>
+
+                    <div id="bids"></div>
+                </div>
+
+
+                <div class="book-column">
+                    <h3>ASK</h3>
+
+                    <div class="book-header">
+                        <span>PRICE</span>
+                        <span>QTY</span>
+                    </div>
+
+                    <div id="asks"></div>
+                </div>
+
+            </div>
+
+        </div>
+
+
+        <div class="panel">
+
+            <h2>MARKET SUMMARY</h2>
+
+            <div class="summary-row">
+                <span>Best Bid</span>
+                <strong id="best-bid">0.00</strong>
+            </div>
+
+            <div class="summary-row">
+                <span>Best Ask</span>
+                <strong id="best-ask">0.00</strong>
+            </div>
+
+            <div class="summary-row highlight">
+                <span>Spread</span>
+                <strong id="spread">0.00</strong>
+            </div>
+
+            <div class="summary-row">
+                <span>Serialization</span>
+                <strong id="encoding">struct</strong>
+            </div>
+
+            <div class="summary-row">
+                <span>Pickle</span>
+                <strong id="pickle">NO</strong>
+            </div>
+
+        </div>
+
+    </section>
+
+
+    <!-- RECENT TRADES -->
+
+    <section class="panel">
+
+        <h2>RECENT TRADES</h2>
+
+        <table>
+
+            <thead>
+                <tr>
+                    <th>TIME</th>
+                    <th>SIDE</th>
+                    <th>PRICE</th>
+                    <th>QUANTITY</th>
+                </tr>
+            </thead>
+
+            <tbody id="trades-table"></tbody>
+
+        </table>
+
+    </section>
+
+
+    <!-- IPC BENCHMARK -->
+
+    <section class="panel">
+
+        <h2>IPC BENCHMARK</h2>
+
+        <div class="benchmark-grid">
+
+            <div>
+                <span>Orders Tested</span>
+                <strong id="orders-tested">0</strong>
+            </div>
+
+            <div>
+                <span>Orders Received</span>
+                <strong id="orders-received">0</strong>
+            </div>
+
+            <div>
+                <span>Orders Lost</span>
+                <strong id="orders-lost">0</strong>
+            </div>
+
+            <div>
+                <span>Throughput</span>
+                <strong id="benchmark-throughput">0</strong>
+            </div>
+
+        </div>
+
+    </section>
+
+
+    <!-- ARCHITECTURE -->
+
+    <section class="panel">
+
+        <h2>SYSTEM ARCHITECTURE</h2>
+
+        <div class="architecture">
+
+            <div>ASYNCIO<br><small>Market Simulator</small></div>
+
+            <span>→</span>
+
+            <div>MMAP<br><small>Ring Buffer</small></div>
+
+            <span>→</span>
+
+            <div>CYTHON<br><small>Matching Engine</small></div>
+
+            <span>→</span>
+
+            <div>ORDER BOOK<br><small>Price-Time Priority</small></div>
+
+            <span>→</span>
+
+            <div>TRADES</div>
+
+        </div>
+
+    </section>
+
+
+    <footer>
+        ChronosMatch • Mid-Review Monitoring Interface
+    </footer>
+
+
+    <script src="app.js"></script>
+
+</body>
+</html>
