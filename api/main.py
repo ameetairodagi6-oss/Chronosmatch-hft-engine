@@ -177,6 +177,7 @@ def get_trades():
     }
 
 
+
 @app.get("/api/benchmark")
 def get_benchmark():
     return {
@@ -185,6 +186,30 @@ def get_benchmark():
         "orders_lost": 0,
         "throughput": 0,
     }
+
+
+@app.get("/api/persistence")
+def get_persistence():
+    return ledger.status()
+
+
+@app.get("/api/persisted-trades")
+def get_persisted_trades(limit: int = 20):
+    import sqlite3
+
+    limit = max(1, min(limit, 100))
+
+    with sqlite3.connect(ledger.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("""
+            SELECT id, buy_order_id, sell_order_id,
+                   price, quantity, created_at
+            FROM trades
+            ORDER BY id DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+
+    return {"trades": [dict(row) for row in rows]}
 
 
 if __name__ == "__main__":
