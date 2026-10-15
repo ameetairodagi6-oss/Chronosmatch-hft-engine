@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 
 import random
@@ -15,9 +16,22 @@ if ENGINE_DIR not in sys.path:
     sys.path.insert(0, ENGINE_DIR)
 
 from order_book import LimitOrderBook
+from persistence.trade_ledger import TradeLedger
+
+lob = LimitOrderBook()
+ledger = TradeLedger()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        yield
+    finally:
+        ledger.close()
 
 
-app = FastAPI(title="ChronosMatch HFT Engine")
+app = FastAPI(
+    title="ChronosMatch HFT Engine",
+    lifespan=lifespan,
+)
 
 
 app.add_middleware(
@@ -28,9 +42,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# One persistent order book for the API
-lob = LimitOrderBook()
 
 next_order_id = 0
 total_orders = 0
@@ -80,6 +91,9 @@ def process_orders(count=5):
             order["price"],
             order["quantity"],
         )
+
+        for trade in trades:
+           ledger.submit(trade)
 
         elapsed = time.perf_counter() - start
 
