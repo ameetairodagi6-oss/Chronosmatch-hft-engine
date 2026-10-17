@@ -59,7 +59,10 @@ def run_worker(
                 break
 
             if trade is None:
-                time.sleep(poll_interval)
+                try:
+                   time.sleep(poll_interval)
+                except KeyboardInterrupt:
+                 break
 
         if batch:
             conn.executemany("""
@@ -76,7 +79,6 @@ def run_worker(
 
 if __name__ == "__main__":
     import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--buffer", default="matched_trades.buf")
     parser.add_argument("--database", default="persistence/trades.db")

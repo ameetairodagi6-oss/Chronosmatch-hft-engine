@@ -16,16 +16,60 @@ if ENGINE_DIR not in sys.path:
     sys.path.insert(0, ENGINE_DIR)
 
 from order_book import LimitOrderBook
-from persistence.trade_ledger import TradeLedger
+from ipc.trade_buffer import TradeBuffer
+from persistence.trade_worker import run_worker
+import multiprocessing
+
 
 lob = LimitOrderBook()
-ledger = TradeLedger()
+
+PROJECT_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..")
+)
+
+BUFFER_PATH = os.path.join(PROJECT_ROOT, "matched_trades.buf")
+DATABASE_PATH = os.path.join(
+    PROJECT_ROOT, "persistence", "trades.db"
+)
+BUFFER_CAPACITY = 100_000
+
+trade_buffer = None
+worker_process = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global trade_buffer, worker_process
+
+    trade_buffer = TradeBuffer(
+        BUFFER_PATH,
+        capacity=BUFFER_CAPACITY,
+        create=True,
+    )
+
+    worker_process = multiprocessing.Process(
+        target=run_worker,
+        args=(BUFFER_PATH, DATABASE_PATH, BUFFER_CAPACITY),
+        name="ChronosMatchTradeWorker",
+    )
+
     try:
+        worker_process.start()
         yield
     finally:
-        ledger.close()
+        if worker_process.is_alive():
+            trade_buffer.request_stop()
+            worker_process.join(timeout=10)
+
+        if worker_process.is_alive():
+            worker_process.terminate()
+            worker_process.join(timeout=5)
+
+        trade_buffer.close()
+
+        if worker_process.pid is not None:
+            worker_process.close()
+
 
 
 app = FastAPI(
@@ -93,7 +137,12 @@ def process_orders(count=5):
         )
 
         for trade in trades:
-           ledger.submit(trade)
+         trade_buffer.write_trade(
+            buy_order_id=trade.buy_order_id,
+            sell_order_id=trade.sell_order_id,
+            price=trade.price,
+            quantity=trade.quantity,
+    )
 
         elapsed = time.perf_counter() - start
 
@@ -204,7 +253,17 @@ def get_benchmark():
 
 @app.get("/api/persistence")
 def get_persistence():
-    return ledger.status()
+    pending = trade_buffer.pending_count() if trade_buffer else 0
+
+    return {
+        "database": DATABASE_PATH,
+        "worker_alive": (
+            worker_process is not None and worker_process.is_alive()
+        ),
+        "pending_trades": pending,
+        "ipc": "mmap",
+        "storage": "SQLite",
+    }
 
 
 @app.get("/api/persisted-trades")
@@ -213,7 +272,7 @@ def get_persisted_trades(limit: int = 20):
 
     limit = max(1, min(limit, 100))
 
-    with sqlite3.connect(ledger.db_path) as conn:
+    with sqlite3.connect(DATABASE_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute("""
             SELECT id, buy_order_id, sell_order_id,
@@ -224,6 +283,7 @@ def get_persisted_trades(limit: int = 20):
         """, (limit,)).fetchall()
 
     return {"trades": [dict(row) for row in rows]}
+
 
 
 if __name__ == "__main__":
