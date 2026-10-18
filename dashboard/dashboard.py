@@ -1,98 +1,250 @@
+
 """
-dashboard.py
-------------
-Day 3 (Week 2): A curses-based terminal dashboard that displays the
-Limit Order Book's top-of-book (best Bid, best Ask, spread) in real
-time, along with per-order matching latency in microseconds.
+ChronosMatch - Live API Dashboard
+---------------------------------
+Displays live data from the ChronosMatch FastAPI backend.
 
-For this demo, the dashboard feeds itself a stream of randomized
-orders directly into the LimitOrderBook (simulating what would, in
-the full system, arrive via the market_firehose + IPC ring buffer).
+Features:
+- API connection and engine status
+- Orders and matched trades
+- Best bid, best ask, and spread
+- Matching latency and throughput
+- Resting bids and asks
+- IPC method, encoding, and Pickle status
+- Automatic refresh and connection-error handling
 
-NOTE (Windows users): curses is a Unix library and is NOT included in
-standard Windows Python. Install the Windows port first:
-    pip install windows-curses
-
-Run with:
+Run:
     python dashboard/dashboard.py
-(press 'q' to quit)
+
+Press Q to quit.
 """
 
 import curses
-import os
-import random
-import sys
+import json
 import time
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "engine"))
-
-from order_book import LimitOrderBook
+import urllib.error
+import urllib.request
 
 
-BASE_PRICE = 100.00
-PRICE_SPREAD = 2.00
-MIN_QUANTITY = 1
-MAX_QUANTITY = 100
-ORDERS_PER_TICK = 5          # orders submitted per screen refresh
-REFRESH_INTERVAL_SECONDS = 0.2  # how often the screen updates
+API_URL = "http://127.0.0.1:8000/api/status"
+REFRESH_INTERVAL_SECONDS = 0.5
+REQUEST_TIMEOUT_SECONDS = 1.0
 
 
-def generate_random_order(order_id: int) -> dict:
-    side = random.choice(["B", "S"])
-    price = round(BASE_PRICE + random.uniform(-PRICE_SPREAD, PRICE_SPREAD), 2)
-    quantity = random.randint(MIN_QUANTITY, MAX_QUANTITY)
-    return {"order_id": order_id, "side": side, "price": price, "quantity": quantity}
+def fetch_api_status():
+    """Fetch the latest status from the FastAPI backend."""
+    request = urllib.request.Request(
+        API_URL,
+        headers={"Accept": "application/json"},
+    )
+
+    try:
+        with urllib.request.urlopen(
+            request,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        ) as response:
+            if response.status != 200:
+                return None, f"HTTP status {response.status}"
+
+            data = json.loads(response.read().decode("utf-8"))
+
+            if not isinstance(data, dict):
+                return None, "Unexpected API response format"
+
+            return data, None
+
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+    ) as exc:
+        return None, str(exc)
+
+
+def format_value(value, decimals=None, suffix=""):
+    """Format API values, including missing or null values."""
+    if value is None:
+        return "--"
+
+    if decimals is not None:
+        try:
+            value = f"{float(value):.{decimals}f}"
+        except (ValueError, TypeError):
+            return "--"
+
+    return f"{value}{suffix}"
+
+
+def draw_line(stdscr, row, text, width):
+    """Draw text without exceeding the terminal boundaries."""
+    height, current_width = stdscr.getmaxyx()
+
+    if row < 0 or row >= height or current_width <= 1:
+        return
+
+    safe_width = min(width, current_width - 1)
+
+    if safe_width > 0:
+        try:
+            stdscr.addnstr(row, 0, str(text), safe_width)
+        except curses.error:
+            pass
 
 
 def run_dashboard(stdscr):
-    curses.curs_set(0)          # hide the blinking cursor
-    stdscr.nodelay(True)        # don't block waiting for keypresses
+    """Display live API data in a refreshing terminal dashboard."""
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+
+    stdscr.nodelay(True)
     stdscr.timeout(int(REFRESH_INTERVAL_SECONDS * 1000))
 
-    lob = LimitOrderBook()
-    order_id = 0
-    total_trades = 0
-    last_latency_us = 0.0
+    api_status = None
+    api_error = "Waiting for the API..."
+    last_success_time = None
 
     while True:
         key = stdscr.getch()
-        if key == ord("q"):
+
+        if key in (ord("q"), ord("Q")):
             break
 
-        # Feed in a small batch of random orders and measure matching latency.
-        tick_start = time.perf_counter()
-        for _ in range(ORDERS_PER_TICK):
-            order = generate_random_order(order_id)
-            trades = lob.submit_order(
-                order["order_id"], order["side"], order["price"], order["quantity"]
-            )
-            total_trades += len(trades)
-            order_id += 1
-        tick_elapsed = time.perf_counter() - tick_start
-        # Average latency per order in this batch, in microseconds.
-        last_latency_us = (tick_elapsed / ORDERS_PER_TICK) * 1_000_000
+        new_status, new_error = fetch_api_status()
 
-        # ---- Render ----------------------------------------------------------
+        if new_status is not None:
+            api_status = new_status
+            api_error = None
+            last_success_time = time.strftime("%H:%M:%S")
+        else:
+            api_error = new_error
+
         stdscr.erase()
-        stdscr.addstr(0, 0, "ChronosMatch — Live Order Book Dashboard", curses.A_BOLD)
-        stdscr.addstr(1, 0, "=" * 50)
+        height, width = stdscr.getmaxyx()
 
-        best_bid = lob.best_bid()
-        best_ask = lob.best_ask()
-        spread = lob.spread()
+        draw_line(
+            stdscr, 0,
+            "ChronosMatch - Live API Dashboard",
+            width,
+        )
+        draw_line(stdscr, 1, "=" * 55, width)
 
-        stdscr.addstr(3, 0, f"Best Bid:  {best_bid if best_bid is not None else '--':>10}")
-        stdscr.addstr(4, 0, f"Best Ask:  {best_ask if best_ask is not None else '--':>10}")
-        spread_display = f"{spread:.4f}" if spread is not None else "--" 
-        stdscr.addstr(5, 0, f"Spread:    {spread_display:>10}")
+        connection = (
+            "CONNECTED" if api_error is None else "DISCONNECTED"
+        )
+        draw_line(
+            stdscr, 3,
+            f"API connection: {connection}",
+            width,
+        )
 
-        stdscr.addstr(7, 0, f"Orders submitted:  {order_id}")
-        stdscr.addstr(8, 0, f"Trades matched:    {total_trades}")
-        stdscr.addstr(9, 0, f"Avg latency/order: {last_latency_us:.2f} us")
+        if last_success_time:
+            draw_line(
+                stdscr, 4,
+                f"Last successful update: {last_success_time}",
+                width,
+            )
 
-        stdscr.addstr(11, 0, f"Resting bids: {len(lob.bids)}   Resting asks: {len(lob.asks)}")
+        if api_status is None:
+            draw_line(
+                stdscr, 6,
+                f"API error: {api_error}",
+                width,
+            )
+            draw_line(
+                stdscr, 8,
+                "Check that the FastAPI server is running.",
+                width,
+            )
+        else:
+            data = api_status
 
-        stdscr.addstr(13, 0, "Press 'q' to quit.")
+            draw_line(
+                stdscr, 6,
+                f"Engine status: {data.get('status', '--')}",
+                width,
+            )
+            draw_line(
+                stdscr, 7,
+                f"Orders submitted: {data.get('orders', '--')}",
+                width,
+            )
+            draw_line(
+                stdscr, 8,
+                f"Trades matched:   {data.get('trades', '--')}",
+                width,
+            )
+
+            draw_line(
+                stdscr, 10,
+                "--- Order Book ---",
+                width,
+            )
+            draw_line(
+                stdscr, 11,
+                f"Best Bid: {format_value(data.get('best_bid'), 2)}",
+                width,
+            )
+            draw_line(
+                stdscr, 12,
+                f"Best Ask: {format_value(data.get('best_ask'), 2)}",
+                width,
+            )
+            draw_line(
+                stdscr, 13,
+                f"Spread:   {format_value(data.get('spread'), 4)}",
+                width,
+            )
+            draw_line(
+                stdscr, 14,
+                f"Resting bids: {data.get('resting_bids', '--')}  "
+                f"Resting asks: {data.get('resting_asks', '--')}",
+                width,
+            )
+
+            draw_line(
+                stdscr, 16,
+                "--- Performance ---",
+                width,
+            )
+            draw_line(
+                stdscr, 17,
+                f"Matching latency: "
+                f"{format_value(data.get('latency_us'), 2, ' us')}",
+                width,
+            )
+            draw_line(
+                stdscr, 18,
+                f"Throughput: {format_value(data.get('throughput'))}",
+                width,
+            )
+
+            draw_line(
+                stdscr, 20,
+                "--- IPC Configuration ---",
+                width,
+            )
+            draw_line(
+                stdscr, 21,
+                f"IPC: {data.get('ipc', '--')}  "
+                f"Encoding: {data.get('encoding', '--')}",
+                width,
+            )
+            draw_line(
+                stdscr, 22,
+                f"Pickle used: {data.get('pickle', '--')}",
+                width,
+            )
+
+        draw_line(
+            stdscr,
+            height - 1,
+            "Auto-refresh enabled | Press Q to quit",
+            width,
+        )
+
         stdscr.refresh()
 
 
