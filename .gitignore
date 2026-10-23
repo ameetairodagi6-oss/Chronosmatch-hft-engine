@@ -9,14 +9,25 @@ venv/
 .venv/
 env/
 
-# Ring buffer / test data artifacts (generated locally, not source)
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ring buffer / generated runtime data
 *.buf
+
+# Local SQLite runtime database
+persistence/trades.db
+persistence/*.db-shm
+persistence/*.db-wal
+
+# Cython build artifacts
+*.c
+*.pyd
+build/
 
 # Editor / OS
 .vscode/
 .DS_Store
-
-# Cython build artifacts (for Week 2 onward)
-*.c
-*.pyd
-build/
+Thumbs.db
